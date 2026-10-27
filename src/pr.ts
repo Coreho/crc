@@ -5,7 +5,7 @@ import type { RunModel } from "./backend.ts";
 import type { Config } from "./config.ts";
 import { parseUnifiedDiff, type Hunk } from "./diff.ts";
 import { location } from "./format.ts";
-import { git, isAncestor, refExists, remoteFor, type Scope } from "./git.ts";
+import { git, hasMerges, isAncestor, refExists, remoteFor, type Scope } from "./git.ts";
 import { GitHubError, type GitHub, type NewReview, type PrRef, type PullFile, type PullRequest, type Review, type ReviewComment } from "./github.ts";
 import { runReview } from "./review.ts";
 import { SEVERITIES, type Finding, type ReviewResult } from "./types.ts";
@@ -52,8 +52,15 @@ export async function reviewPullRequest(opts: PrReviewOptions): Promise<PrReview
   }
 
   await ensureCommits(opts.root, ref, pr, progress);
+  // A merge since the last review (such as "Update branch") would drag base-branch
+  // changes into an incremental diff, so review the whole PR instead.
   const incrementalFrom =
-    !opts.full && lastReviewed && lastReviewed !== head && (await refExists(opts.root, lastReviewed)) && (await isAncestor(opts.root, lastReviewed, head))
+    !opts.full &&
+    lastReviewed &&
+    lastReviewed !== head &&
+    (await refExists(opts.root, lastReviewed)) &&
+    (await isAncestor(opts.root, lastReviewed, head)) &&
+    !(await hasMerges(opts.root, lastReviewed, head))
       ? lastReviewed
       : undefined;
   const scope: Scope = incrementalFrom
@@ -97,10 +104,16 @@ export async function reviewPullRequest(opts: PrReviewOptions): Promise<PrReview
   }
 }
 
+/**
+ * The head commit of crc's latest review. Only reviews from GitHub Actions or
+ * from people with write access count, so a PR author can't post a fake marker
+ * to make crc skip their commits.
+ */
 export function lastReviewedSha(reviews: Review[]): string | undefined {
   let sha: string | undefined;
   for (const r of reviews) {
-    const m = REVIEWED_MARKER.exec(r.body ?? "");
+    const trusted = r.user?.login === "github-actions[bot]" || ["OWNER", "MEMBER", "COLLABORATOR"].includes(r.author_association);
+    const m = trusted ? REVIEWED_MARKER.exec(r.body ?? "") : null;
     if (m) sha = m[1];
   }
   return sha;

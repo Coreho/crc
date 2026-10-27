@@ -23,6 +23,9 @@ export interface Review {
   body: string | null;
   commit_id: string | null;
   html_url: string;
+  user: { login: string } | null;
+  /** The reviewer's relationship to the repository: OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, NONE, ... */
+  author_association: string;
 }
 
 export interface ReviewComment {

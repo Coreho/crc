@@ -155,6 +155,11 @@ export async function isAncestor(root: string, ancestor: string, descendant: str
   );
 }
 
+/** True when any commit in from..to is a merge commit. */
+export async function hasMerges(root: string, from: string, to: string): Promise<boolean> {
+  return (await git(["rev-list", "--merges", "--max-count=1", `${from}..${to}`], root)).trim() !== "";
+}
+
 /** The `owner/repo` that the origin remote points at on GitHub, if it does. */
 export async function githubRepoFromRemote(root: string): Promise<string | undefined> {
   const url = (await git(["remote", "get-url", "origin"], root).catch(() => "")).trim();
