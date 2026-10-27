@@ -67,17 +67,17 @@ If the PR's head isn't what you have checked out, crc reviews it in a temporary 
 
 To review every pull request in a repository as it's opened or updated:
 
-1. Run `claude setup-token` and copy the token it prints (valid for a year).
-2. In the repository, save it as an Actions secret named `CLAUDE_CODE_OAUTH_TOKEN`:
-   `gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo owner/repo` (paste the token when asked).
-3. Copy [`examples/crc-review.yml`](examples/crc-review.yml) to `.github/workflows/crc-review.yml` in that repository.
+1. Copy [`examples/crc-review.yml`](examples/crc-review.yml) to `.github/workflows/crc-review.yml` in that repository.
+2. Run `claude setup-token` and copy the token it prints (valid for a year).
+3. Save it as an Actions secret named `CLAUDE_CODE_OAUTH_TOKEN`. For one repository, run `gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo owner/repo` and paste the token when asked. For every repository you own (and those of organizations you administer) that has the workflow, run [`scripts/set-token.ps1`](scripts/set-token.ps1). It asks for the token once, without echoing it, and sets the secret in each one. Run it again when the token expires. `-WhatIf` lists the repositories without changing anything.
 
-The workflow uses `Coreho/crc@main` as its action. While this repo is private, other repositories can use the action only if *Settings → Actions → General → Access* allows repositories owned by Coreho:
-`gh api -X PUT repos/Coreho/crc/actions/permissions/access -f access_level=user`.
+Do the token steps in your own terminal, not through an AI assistant, so the token doesn't end up in a transcript.
 
-Reviews posted from Actions appear under `github-actions[bot]`. Reviews posted with `crc pr` from your machine appear under your own account. Pass extra flags with the action's `args` input, such as `args: --no-verify --model sonnet`.
+The workflow uses `Coreho/crc@main` as its action. This repository is public, so any repository can use it, public or private. Reviews posted from Actions appear under `github-actions[bot]`. Reviews posted with `crc pr` from your machine appear under your own account. Pass extra flags with the action's `args` input, such as `args: --no-verify --model sonnet`.
 
-**Security.** The Claude process that reads PR content never sees a GitHub token: crc strips `GITHUB_TOKEN`, `GH_TOKEN`, and the Actions runtime tokens from its environment. It also has only read-only tools. GitHub doesn't give secrets to workflows triggered by PRs from forks, so on a fork PR the action fails at the credentials check instead of running.
+The workflow skips drafts until they're marked ready for review. It also skips PRs from forks and from Dependabot, because GitHub gives those runs no secrets and a read-only token, so they couldn't be reviewed anyway. Run `crc pr <number>` from your machine to review one of those.
+
+**Security.** The Claude process that reads PR content never sees a GitHub token: crc strips `GITHUB_TOKEN`, `GH_TOKEN`, and the Actions runtime tokens from its environment. It also has only read-only tools. Because fork PRs are skipped, outside contributors can't run anything with your Claude token.
 
 ## How it works
 
@@ -130,7 +130,7 @@ Set `CRC_DEBUG=1` to print one line per Claude run to stderr, showing its turn c
 
 The tests cover diff parsing, git scope collection against throwaway repos, the review pipeline with a fake model, and the pull request flow against a fake GitHub API. They make no Claude or GitHub calls.
 
-Source layout: `src/git.ts` (what changed), `src/diff.ts` (diff parsing and rendering), `src/prompts.ts` (system prompts and schemas), `src/backend.ts` (the `claude -p` runner), `src/review.ts` (batching, verification, normalization), `src/format.ts` (text and Markdown output), `src/github.ts` (GitHub REST client), `src/pr.ts` (pull request reviews), `src/cli.ts`, and `action.yml` (the GitHub Action).
+Source layout: `src/git.ts` (what changed), `src/diff.ts` (diff parsing and rendering), `src/prompts.ts` (system prompts and schemas), `src/backend.ts` (the `claude -p` runner), `src/review.ts` (batching, verification, normalization), `src/format.ts` (text and Markdown output), `src/github.ts` (GitHub REST client), `src/pr.ts` (pull request reviews), `src/cli.ts`, `action.yml` (the GitHub Action), and `scripts/set-token.ps1` (saves the token secret in every repository that runs the workflow).
 
 ## Not built yet
 
