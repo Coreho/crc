@@ -1,0 +1,26 @@
+{
+  "name": "crc",
+  "version": "0.1.0",
+  "description": "Local AI code review for your git changes, powered by Claude Code",
+  "type": "module",
+  "bin": {
+    "crc": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "check": "npm run typecheck && npm test",
+    "dev": "node src/cli.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.2"
+  }
+}
