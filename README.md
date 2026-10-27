@@ -48,7 +48,7 @@ crc --fail-on critical
 
 ## Pull request reviews
 
-crc posts a GitHub review on a pull request. The review body has a summary, the finding counts, and any findings that don't sit on a line in the PR's diff. Every other finding becomes an inline comment, with a `suggestion` block you can apply in one click when the fix is short. After new commits are pushed, the next run reviews only the commits since crc's last review. crc finds that point from a hidden marker it leaves in each review. Drafts, closed PRs, and commits it has already reviewed are skipped unless you pass `--force`.
+crc posts a GitHub review on a pull request. The review body has a summary, the finding counts, and any findings that don't sit on a line in the PR's diff. Every other finding becomes an inline comment, with a `suggestion` block you can apply in one click when the fix is short. After new commits are pushed, the next run reviews only the commits since crc's last review. crc finds that point from a hidden marker it leaves in each review, and it trusts that marker only when the review came from `github-actions[bot]` or someone with write access. If the branch was force-pushed, or a merge (such as GitHub's "Update branch") landed since the last review, crc reviews the whole PR again so base-branch changes aren't treated as PR changes. Drafts, closed PRs, and commits it has already reviewed are skipped unless you pass `--force`.
 
 ### From your machine
 
