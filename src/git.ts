@@ -6,7 +6,9 @@ import { addedFileDiff, parseUnifiedDiff, type FileDiff } from "./diff.ts";
 export type Scope =
   | { kind: "base"; ref: string }
   | { kind: "uncommitted" }
-  | { kind: "staged" };
+  | { kind: "staged" }
+  /** Committed changes only, from the merge base of `base` and `head` to `head`. Used for pull requests. */
+  | { kind: "range"; base: string; head: string; label: string };
 
 /** Untracked files bigger than this are listed as skipped instead of reviewed. */
 const MAX_UNTRACKED_BYTES = 512 * 1024;
@@ -30,7 +32,7 @@ export async function repoRoot(cwd: string): Promise<string> {
   return (await git(["rev-parse", "--show-toplevel"], cwd)).trim();
 }
 
-async function refExists(root: string, ref: string): Promise<boolean> {
+export async function refExists(root: string, ref: string): Promise<boolean> {
   return git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], root).then(
     () => true,
     () => false,
@@ -95,6 +97,13 @@ export async function collectChanges(root: string, scope: Scope, includeUntracke
     const mergeBase = (await git(["merge-base", scope.ref, "HEAD"], root)).trim();
     description = `changes since ${scope.ref} (${mergeBase.slice(0, 7)}), including uncommitted work`;
     args = [...diffArgs, mergeBase];
+  } else if (scope.kind === "range") {
+    for (const ref of [scope.base, scope.head]) {
+      if (!(await refExists(root, ref))) throw new Error(`Commit ${ref} is not available locally`);
+    }
+    const mergeBase = (await git(["merge-base", scope.base, scope.head], root)).trim();
+    description = scope.label;
+    args = [...diffArgs, mergeBase, scope.head];
   } else {
     description = "uncommitted changes";
     args = [...diffArgs, hasHead ? "HEAD" : EMPTY_TREE];
@@ -103,7 +112,7 @@ export async function collectChanges(root: string, scope: Scope, includeUntracke
   const files = parseUnifiedDiff(await git(args, root));
   const skipped: Changes["skipped"] = [];
 
-  if (includeUntracked && scope.kind !== "staged") {
+  if (includeUntracked && scope.kind !== "staged" && scope.kind !== "range") {
     const listed = await git(["ls-files", "--others", "--exclude-standard", "-z"], root);
     for (const path of listed.split("\0").filter(Boolean)) {
       const abs = join(root, path);
@@ -129,8 +138,42 @@ export async function collectChanges(root: string, scope: Scope, includeUntracke
   return { description, note, files, skipped };
 }
 
-/** Contents of `path` as the scope sees it: the index for staged reviews, otherwise the working tree. */
+/**
+ * Contents of `path` as the scope sees it: the index for staged reviews, the
+ * head commit for ranges, otherwise the working tree.
+ */
 export async function readScopedFile(root: string, scope: Scope, path: string): Promise<string | undefined> {
   if (scope.kind === "staged") return git(["show", `:${path}`], root).catch(() => undefined);
+  if (scope.kind === "range") return git(["show", `${scope.head}:${path}`], root).catch(() => undefined);
   return readFile(join(root, path), "utf8").catch(() => undefined);
+}
+
+export async function isAncestor(root: string, ancestor: string, descendant: string): Promise<boolean> {
+  return git(["merge-base", "--is-ancestor", ancestor, descendant], root).then(
+    () => true,
+    () => false,
+  );
+}
+
+/** True when any commit in from..to is a merge commit. */
+export async function hasMerges(root: string, from: string, to: string): Promise<boolean> {
+  return (await git(["rev-list", "--merges", "--max-count=1", `${from}..${to}`], root)).trim() !== "";
+}
+
+/** The `owner/repo` that the origin remote points at on GitHub, if it does. */
+export async function githubRepoFromRemote(root: string): Promise<string | undefined> {
+  const url = (await git(["remote", "get-url", "origin"], root).catch(() => "")).trim();
+  const m = /github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(url);
+  return m?.[1];
+}
+
+/** The name of a remote whose URL points at `owner/repo` on GitHub. */
+export async function remoteFor(root: string, repo: string): Promise<string | undefined> {
+  const out = await git(["remote", "-v"], root).catch(() => "");
+  for (const line of out.split("\n")) {
+    const [name, url] = line.split(/\s+/);
+    const m = url && /github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(url);
+    if (name && m?.[1]?.toLowerCase() === repo.toLowerCase()) return name;
+  }
+  return undefined;
 }
