@@ -1,0 +1,56 @@
+name: crc review
+description: Review pull requests with crc, running through Claude Code, and post the findings as review comments.
+inputs:
+  claude_code_oauth_token:
+    description: Claude subscription token from `claude setup-token`. Set this or anthropic_api_key.
+    required: false
+  anthropic_api_key:
+    description: Claude API key, as an alternative to the subscription token.
+    required: false
+  github_token:
+    description: Token used to read the pull request and post the review.
+    required: false
+    default: ${{ github.token }}
+  args:
+    description: Extra crc arguments, such as "--no-verify" or "--model sonnet".
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v7
+      with:
+        node-version: 24
+
+    - name: Install Claude Code
+      shell: bash
+      run: npm install -g @anthropic-ai/claude-code
+
+    - name: Build crc
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm ci --no-audit --no-fund && npm run build
+
+    - name: Review pull request
+      shell: bash
+      env:
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        CRC_ARGS: ${{ inputs.args }}
+        CRC_DIR: ${{ github.action_path }}
+      run: |
+        # An empty variable can still win over the other credential, so drop whichever is unset.
+        [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] || unset CLAUDE_CODE_OAUTH_TOKEN
+        [ -n "$ANTHROPIC_API_KEY" ] || unset ANTHROPIC_API_KEY
+        if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}${ANTHROPIC_API_KEY:-}" ]; then
+          echo "::error::crc needs claude_code_oauth_token or anthropic_api_key. Run 'claude setup-token' and save the token as the CLAUDE_CODE_OAUTH_TOKEN repository secret."
+          exit 1
+        fi
+        if [ -z "$PR_NUMBER" ]; then
+          echo "::error::crc review runs on pull_request events only."
+          exit 1
+        fi
+        read -r -a extra <<< "$CRC_ARGS"
+        node "$CRC_DIR/dist/cli.js" pr "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" "${extra[@]}"

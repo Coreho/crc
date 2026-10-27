@@ -45,7 +45,7 @@ export function claudeCodeRunner(opts: { bin?: string; timeoutMs?: number } = {}
         "--no-session-persistence",
         "--permission-prompts", "none",
       ];
-      const child = spawn(bin, args, { cwd: req.cwd, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+      const child = spawn(bin, args, { cwd: req.cwd, env: childEnv(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
       const out: Buffer[] = [];
       const err: Buffer[] = [];
       const timer = setTimeout(() => {
@@ -80,6 +80,19 @@ export function claudeCodeRunner(opts: { bin?: string; timeoutMs?: number } = {}
       });
       child.stdin.end(req.prompt);
     });
+}
+
+/**
+ * The reviewer reads untrusted pull request content, so it gets no GitHub
+ * credentials. Claude Code's own auth variables pass through.
+ */
+export function childEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (/^(GITHUB_TOKEN|GH_TOKEN|GH_ENTERPRISE_TOKEN|GITHUB_ENTERPRISE_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN|INPUT_.*)$/i.test(key)) continue;
+    out[key] = value;
+  }
+  return out;
 }
 
 interface ClaudeJsonResult {
