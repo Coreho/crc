@@ -74,7 +74,7 @@ test("review pipeline: normalizes, verifies, hides nits, attaches snippets", asy
 
   assert.equal(model.calls.length, 2);
   const reviewCall = model.calls[0]!;
-  assert.equal(reviewCall.model, "opus");
+  assert.equal(reviewCall.model, "claude-sonnet-5-5");
   assert.equal(reviewCall.cwd, root);
   assert.match(reviewCall.prompt, /### src\/parse\.ts \(modified, \+2 -1\)/);
   assert.match(reviewCall.prompt, /4 \+ {3}return n \/ 0;/);
@@ -217,4 +217,19 @@ test("parseResult reads Claude Code's JSON output", () => {
   assert.throws(() => parseResult("not json"), /not JSON/);
   assert.throws(() => parseResult(JSON.stringify({ subtype: "error_max_turns", is_error: true })), /error_max_turns/);
   assert.throws(() => parseResult(JSON.stringify({ subtype: "success", result: "hi" })), /without structured output/);
+});
+
+test("after a failed model call, no new calls start", async () => {
+  const { root, write } = makeRepo({ "a.txt": "a\n", "b.txt": "b\n", "c.txt": "c\n" });
+  for (const f of ["a.txt", "b.txt", "c.txt"]) write(f, "changed\n");
+  let calls = 0;
+  const run = async (): Promise<ModelResult> => {
+    calls++;
+    throw new Error("You've hit your 5-hour limit");
+  };
+  await assert.rejects(
+    runReview({ root, scope: { kind: "uncommitted" }, config: { ...DEFAULT_CONFIG }, runModel: run, batchLines: 1, concurrency: 1 }),
+    /5-hour limit/,
+  );
+  assert.equal(calls, 1, "the other two batches never start");
 });

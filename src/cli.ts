@@ -41,9 +41,9 @@ Output:
                            critical, major, minor, or nit
 
 Model:
-      --model <name>       Model for the review pass (default: opus)
-      --verify-model <n>   Model for the verification pass (default: opus)
-      --effort <level>     Review effort: low, medium, high, xhigh, max (default: high)
+      --model <name>       Model for the review pass (default: claude-sonnet-5-5)
+      --verify-model <n>   Model for the verification pass (default: claude-sonnet-5-5)
+      --effort <level>     Review effort: low, medium, high, xhigh, max (default: medium)
       --no-verify          Skip the verification pass (faster, noisier)
       --concurrency <n>    Parallel Claude runs (default: 2)
 

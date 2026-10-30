@@ -2,15 +2,16 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RunModel } from "./backend.ts";
-import type { Config } from "./config.ts";
-import { parseUnifiedDiff, type Hunk } from "./diff.ts";
+import { isIgnored, type Config } from "./config.ts";
+import { parseUnifiedDiff, sameChange, type Hunk } from "./diff.ts";
 import { location } from "./format.ts";
-import { git, hasMerges, isAncestor, refExists, remoteFor, type Scope } from "./git.ts";
+import { collectChanges, git, hasMerges, isAncestor, refExists, remoteFor, type Scope } from "./git.ts";
 import { GitHubError, type GitHub, type NewReview, type PrRef, type PullFile, type PullRequest, type Review, type ReviewComment } from "./github.ts";
 import { runReview } from "./review.ts";
 import { SEVERITIES, type Finding, type ReviewResult } from "./types.ts";
 
 const REVIEWED_MARKER = /<!-- crc:reviewed=([0-9a-f]{40}) -->/;
+const BASE_MARKER = /<!-- crc:base=([0-9a-f]{40}) -->/;
 
 export interface PrReviewOptions {
   /** A local clone of the pull request's repository. */
@@ -46,23 +47,16 @@ export async function reviewPullRequest(opts: PrReviewOptions): Promise<PrReview
   if (!opts.force && pr.state !== "open") return { status: "skipped", reason: `PR #${pr.number} is ${pr.state}` };
   if (!opts.force && pr.draft) return { status: "skipped", reason: `PR #${pr.number} is a draft` };
 
-  const lastReviewed = lastReviewedSha(await gh.listReviews(ref.repo, ref.number));
-  if (lastReviewed === head && !opts.force) {
+  const last = lastReview(await gh.listReviews(ref.repo, ref.number));
+  if (last?.sha === head && !opts.force) {
     return { status: "skipped", reason: `crc already reviewed ${short(head)}` };
   }
 
   await ensureCommits(opts.root, ref, pr, progress);
-  // A merge since the last review (such as "Update branch") would drag base-branch
-  // changes into an incremental diff, so review the whole PR instead.
-  const incrementalFrom =
-    !opts.full &&
-    lastReviewed &&
-    lastReviewed !== head &&
-    (await refExists(opts.root, lastReviewed)) &&
-    (await isAncestor(opts.root, lastReviewed, head)) &&
-    !(await hasMerges(opts.root, lastReviewed, head))
-      ? lastReviewed
-      : undefined;
+  const since = !opts.full && last && last.sha !== head ? await sinceLastReview(opts.root, ref, pr, last, opts.config) : undefined;
+  const incrementalFrom = since?.kind === "commits" ? since.from : undefined;
+  const rebased = since?.kind === "rebased" ? since : undefined;
+  const fullLabel = `PR #${pr.number} "${pr.title}" (${pr.head.ref} into ${pr.base.ref})`;
   const scope: Scope = incrementalFrom
     ? {
         kind: "range",
@@ -70,7 +64,14 @@ export async function reviewPullRequest(opts: PrReviewOptions): Promise<PrReview
         head,
         label: `PR #${pr.number}: commits pushed since the last crc review (${short(incrementalFrom)}..${short(head)})`,
       }
-    : { kind: "range", base: pr.base.sha, head, label: `PR #${pr.number} "${pr.title}" (${pr.head.ref} into ${pr.base.ref})` };
+    : rebased
+      ? {
+          kind: "range",
+          base: pr.base.sha,
+          head,
+          label: `${fullLabel}, reviewing only the files whose changes differ from crc's last review at ${short(rebased.from)}, since the branch was rebased or merged after it`,
+        }
+      : { kind: "range", base: pr.base.sha, head, label: fullLabel };
 
   const checkout = await checkoutCommit(opts.root, head, progress);
   try {
@@ -80,11 +81,13 @@ export async function reviewPullRequest(opts: PrReviewOptions): Promise<PrReview
       config: opts.config,
       runModel: opts.runModel,
       includeUntracked: false,
+      only: rebased?.changed,
       concurrency: opts.concurrency,
       onProgress: opts.onProgress,
     });
     const files = await gh.listFiles(ref.repo, ref.number);
-    const review = buildReview(result, files, { headSha: head, incrementalFrom });
+    const info: ReviewInfo = { headSha: head, baseSha: pr.base.sha, incrementalFrom, rebased };
+    const review = buildReview(result, files, info);
     if (opts.dryRun) return { status: "dry-run", review, result };
 
     progress("Posting review");
@@ -95,7 +98,7 @@ export async function reviewPullRequest(opts: PrReviewOptions): Promise<PrReview
       if (!(err instanceof GitHubError && err.status === 422) || review.comments.length === 0) throw err;
       // GitHub refused an inline position; put every finding in the review body instead.
       progress("GitHub rejected an inline comment, posting the findings in the review body");
-      const fallback = buildReview(result, [], { headSha: head, incrementalFrom });
+      const fallback = buildReview(result, [], info);
       const posted = await gh.createReview(ref.repo, ref.number, fallback);
       return { status: "posted", url: posted.html_url, review: fallback, result };
     }
@@ -105,18 +108,68 @@ export async function reviewPullRequest(opts: PrReviewOptions): Promise<PrReview
 }
 
 /**
- * The head commit of crc's latest review. Only reviews from GitHub Actions or
- * from people with write access count, so a PR author can't post a fake marker
- * to make crc skip their commits.
+ * The head commit of crc's latest review, and the base it was compared with
+ * (older reviews don't record it). Only reviews from GitHub Actions or from
+ * people with write access count, so a PR author can't post a fake marker to
+ * make crc skip their commits.
  */
-export function lastReviewedSha(reviews: Review[]): string | undefined {
-  let sha: string | undefined;
+export function lastReview(reviews: Review[]): { sha: string; base?: string } | undefined {
+  let last: { sha: string; base?: string } | undefined;
   for (const r of reviews) {
     const trusted = r.user?.login === "github-actions[bot]" || ["OWNER", "MEMBER", "COLLABORATOR"].includes(r.author_association);
     const m = trusted ? REVIEWED_MARKER.exec(r.body ?? "") : null;
-    if (m) sha = m[1];
+    if (m) last = { sha: m[1]!, base: BASE_MARKER.exec(r.body ?? "")?.[1] };
   }
-  return sha;
+  return last;
+}
+
+type Since = { kind: "commits"; from: string } | ({ kind: "rebased"; from: string } & Rebased);
+
+/**
+ * How the PR moved since crc's last review. New commits on top get an
+ * incremental review. After a rebase or a merge (such as "Update branch"), an
+ * incremental diff would drag in base-branch changes, so each file's change is
+ * compared with the one crc reviewed and only files that differ are reviewed
+ * again. Undefined means review the whole PR.
+ */
+async function sinceLastReview(
+  root: string,
+  ref: PrRef,
+  pr: PullRequest,
+  last: { sha: string; base?: string },
+  config: Config,
+): Promise<Since | undefined> {
+  const head = pr.head.sha;
+  if (!(await haveCommit(root, ref.repo, last.sha))) return undefined;
+  if ((await isAncestor(root, last.sha, head)) && !(await hasMerges(root, last.sha, head))) {
+    return { kind: "commits", from: last.sha };
+  }
+  // Without a recorded base, the merge base with today's base branch stands in.
+  // When the base branch was rebased too, that reaches back further, so at worst
+  // extra files look changed and get reviewed again.
+  const oldBase = last.base && (await haveCommit(root, ref.repo, last.base)) ? last.base : pr.base.sha;
+  const [before, now] = await Promise.all([
+    collectChanges(root, { kind: "range", base: oldBase, head: last.sha, label: "" }, false),
+    collectChanges(root, { kind: "range", base: pr.base.sha, head, label: "" }, false),
+  ]);
+  const reviewed = new Map(before.files.map((f) => [f.path, f]));
+  const changed: string[] = [];
+  let unchanged = 0;
+  for (const f of now.files) {
+    const old = reviewed.get(f.path);
+    if (!old || !sameChange(old, f)) changed.push(f.path);
+    else if (!f.binary && !isIgnored(f.path, config)) unchanged++;
+  }
+  return { kind: "rebased", from: last.sha, changed, unchanged };
+}
+
+/** A force-push leaves the old head on no branch, but GitHub still serves the commit by its SHA. */
+async function haveCommit(root: string, repo: string, sha: string): Promise<boolean> {
+  if (await refExists(root, sha)) return true;
+  const remote = await remoteFor(root, repo);
+  if (!remote) return false;
+  await git(["fetch", "--no-tags", remote, sha], root).catch(() => {});
+  return refExists(root, sha);
 }
 
 async function ensureCommits(root: string, ref: PrRef, pr: PullRequest, progress: (m: string) => void): Promise<void> {
@@ -179,7 +232,22 @@ export function placeFinding(f: Finding, hunks: Hunk[] | undefined): Placement |
   return undefined;
 }
 
-export function buildReview(result: ReviewResult, files: PullFile[], info: { headSha: string; incrementalFrom?: string }): NewReview {
+interface Rebased {
+  /** Files whose change differs from the last review; only these were reviewed. */
+  changed: string[];
+  /** Reviewable files whose change is the same as at the last review. */
+  unchanged: number;
+}
+
+export interface ReviewInfo {
+  headSha: string;
+  /** The PR base at review time, recorded so a later rebase can be compared against it. */
+  baseSha?: string;
+  incrementalFrom?: string;
+  rebased?: Rebased & { from: string };
+}
+
+export function buildReview(result: ReviewResult, files: PullFile[], info: ReviewInfo): NewReview {
   const hunks = prHunks(files);
   const comments: ReviewComment[] = [];
   const unplaced: Finding[] = [];
@@ -212,7 +280,7 @@ function commentBody(f: Finding, withSuggestion: boolean): string {
   return out.join("\n");
 }
 
-function reviewBody(r: ReviewResult, unplaced: Finding[], info: { headSha: string; incrementalFrom?: string }): string {
+function reviewBody(r: ReviewResult, unplaced: Finding[], info: ReviewInfo): string {
   const what = info.incrementalFrom
     ? `the commits since \`${short(info.incrementalFrom)}\` (up to \`${short(info.headSha)}\`)`
     : `\`${short(info.headSha)}\``;
@@ -220,7 +288,12 @@ function reviewBody(r: ReviewResult, unplaced: Finding[], info: { headSha: strin
   if (r.summary) out.push(r.summary, "");
 
   const files = `${r.files.length} file${r.files.length === 1 ? "" : "s"}`;
-  if (r.findings.length === 0) {
+  const rebased = info.rebased;
+  if (rebased && r.files.length === 0) {
+    out.push(
+      `Nothing new to review at ${what}: the branch was rebased or merged since crc's last review at \`${short(rebased.from)}\`, and the changes crc reviews are the same.`,
+    );
+  } else if (r.findings.length === 0) {
     out.push(`No issues found in ${files} at ${what}.`);
   } else {
     const counts = SEVERITIES.map((s) => [s, r.findings.filter((f) => f.severity === s).length] as const)
@@ -228,6 +301,13 @@ function reviewBody(r: ReviewResult, unplaced: Finding[], info: { headSha: strin
       .map(([s, n]) => `${n} ${s}`)
       .join(", ");
     out.push(`**${r.findings.length} finding${r.findings.length === 1 ? "" : "s"}** (${counts}) in ${files} at ${what}.`);
+  }
+  if (rebased && r.files.length > 0 && rebased.unchanged > 0) {
+    const n = rebased.unchanged;
+    out.push(
+      "",
+      `The branch was rebased or merged since crc's last review at \`${short(rebased.from)}\`, so only files whose changes differ were reviewed again. ${n} file${n === 1 ? "" : "s"} with the same changes ${n === 1 ? "was" : "were"} skipped.`,
+    );
   }
 
   if (unplaced.length > 0) {
@@ -244,7 +324,9 @@ function reviewBody(r: ReviewResult, unplaced: Finding[], info: { headSha: strin
   if (r.stats.costUsd > 0) footer.push(`est. API cost $${r.stats.costUsd.toFixed(2)}`);
   if (r.stats.hiddenNits > 0) footer.push(`${r.stats.hiddenNits} nit${r.stats.hiddenNits === 1 ? "" : "s"} hidden`);
   if (r.skipped.length > 0) footer.push(`skipped ${r.skipped.map((s) => `${s.path} (${s.reason})`).join(", ")}`);
-  out.push("", `<sub>crc · ${footer.join(" · ")}</sub>`, `<!-- crc:reviewed=${info.headSha} -->`);
+  out.push("", `<sub>crc · ${footer.join(" · ")}</sub>`);
+  if (info.baseSha) out.push(`<!-- crc:base=${info.baseSha} -->`);
+  out.push(`<!-- crc:reviewed=${info.headSha} -->`);
   return out.join("\n");
 }
 
