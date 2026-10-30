@@ -74,7 +74,7 @@ test("review pipeline: normalizes, verifies, hides nits, attaches snippets", asy
 
   assert.equal(model.calls.length, 2);
   const reviewCall = model.calls[0]!;
-  assert.equal(reviewCall.model, "opus");
+  assert.equal(reviewCall.model, "claude-sonnet-5-5");
   assert.equal(reviewCall.cwd, root);
   assert.match(reviewCall.prompt, /### src\/parse\.ts \(modified, \+2 -1\)/);
   assert.match(reviewCall.prompt, /4 \+ {3}return n \/ 0;/);

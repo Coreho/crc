@@ -36,7 +36,7 @@ crc --fail-on major      # exit 1 if anything major or critical is found
 
 Other options: `--no-verify` skips the second pass (faster, noisier), `--nits` shows trivial findings, `--show-rejected` lists what the verification pass threw out and why, `--model`/`--verify-model`/`--effort` pick models and effort, `--no-untracked` leaves out new untracked files. `crc --help` lists everything.
 
-A review usually takes a few minutes, because Claude reads around the codebase to confirm each suspicion. The "est. API cost" in the report is what the run would cost at API list prices. Your usage counts against your Claude Code plan. Both passes run Opus at medium effort by default; raise it with `--effort high` or the `effort` key in `.crc.json` when a change deserves a closer look.
+A review usually takes a few minutes, because Claude reads around the codebase to confirm each suspicion. The "est. API cost" in the report is what the run would cost at API list prices. Your usage counts against your Claude Code plan. Both passes run Claude Sonnet 5.5 at medium effort by default, to keep reviews light on the plan. For a closer look, raise it with `--model opus`, `--effort high`, or the `model` and `effort` keys in `.crc.json`.
 
 ### Pre-push hook
 
@@ -97,8 +97,8 @@ Run `crc init` to write a `.crc.json` in the repo root. Every key is optional:
   "instructions": "We use Result types instead of exceptions; flag any new throw.",
   "ignore": ["generated/**", "**/*.pb.go"],
   "guidelines": ["CLAUDE.md", "AGENTS.md", ".github/copilot-instructions.md"],
-  "model": "opus",
-  "verifyModel": "opus",
+  "model": "claude-sonnet-5-5",
+  "verifyModel": "claude-sonnet-5-5",
   "effort": "medium",
   "verifyEffort": "medium",
   "verify": true,
