@@ -1,6 +1,6 @@
 # crc
 
-_Last updated: 2026-10-27_
+_Last updated: 2026-10-29_
 
 A personal AI code reviewer in the spirit of CodeRabbit. It reads a diff, has Claude review it with read access to the rest of the repo, runs a second skeptical pass that throws out false positives, and reports the findings that survive, each with file, line, severity, and an optional fix. It works on local changes from your terminal and on GitHub pull requests, where it posts a review with inline comments and one-click suggested changes.
 
@@ -36,7 +36,7 @@ crc --fail-on major      # exit 1 if anything major or critical is found
 
 Other options: `--no-verify` skips the second pass (faster, noisier), `--nits` shows trivial findings, `--show-rejected` lists what the verification pass threw out and why, `--model`/`--verify-model`/`--effort` pick models and effort, `--no-untracked` leaves out new untracked files. `crc --help` lists everything.
 
-A review usually takes a few minutes, because Claude reads around the codebase to confirm each suspicion. The "est. API cost" in the report is what the run would cost at API list prices. Your usage counts against your Claude Code plan.
+A review usually takes a few minutes, because Claude reads around the codebase to confirm each suspicion. The "est. API cost" in the report is what the run would cost at API list prices. Your usage counts against your Claude Code plan. Both passes run Opus at medium effort by default; raise it with `--effort high` or the `effort` key in `.crc.json` when a change deserves a closer look.
 
 ### Pre-push hook
 
@@ -48,7 +48,7 @@ crc --fail-on critical
 
 ## Pull request reviews
 
-crc posts a GitHub review on a pull request. The review body has a summary, the finding counts, and any findings that don't sit on a line in the PR's diff. Every other finding becomes an inline comment, with a `suggestion` block you can apply in one click when the fix is short. After new commits are pushed, the next run reviews only the commits since crc's last review. crc finds that point from a hidden marker it leaves in each review, and it trusts that marker only when the review came from `github-actions[bot]` or someone with write access. If the branch was force-pushed, or a merge (such as GitHub's "Update branch") landed since the last review, crc reviews the whole PR again so base-branch changes aren't treated as PR changes. Drafts, closed PRs, and commits it has already reviewed are skipped unless you pass `--force`.
+crc posts a GitHub review on a pull request. The review body has a summary, the finding counts, and any findings that don't sit on a line in the PR's diff. Every other finding becomes an inline comment, with a `suggestion` block you can apply in one click when the fix is short. After new commits are pushed, the next run reviews only the commits since crc's last review. crc finds that point from a hidden marker it leaves in each review, and it trusts that marker only when the review came from `github-actions[bot]` or someone with write access. If the branch was rebased or force-pushed, or a merge (such as GitHub's "Update branch") landed since the last review, an incremental diff would pull in base-branch changes. Instead, crc compares each file's change in the PR with the change it reviewed last time and reviews again only the files that differ, even when the change only moved because lines above it did. A rebase that changes nothing in the PR gets a short "nothing new to review" review and no Claude call. The marker records the PR's base too, so the comparison is exact. Older reviews don't have that, so crc falls back to the merge base with today's base branch, which at worst marks extra files as changed. A force-push leaves the old commit on no branch, but GitHub still serves it by its SHA, so crc fetches it when the clone doesn't have it, and reviews the whole PR only if that fails. Drafts, closed PRs, and commits it has already reviewed are skipped unless you pass `--force`.
 
 ### From your machine
 
@@ -58,7 +58,7 @@ Inside a clone of the repository, with the GitHub CLI logged in (or `GITHUB_TOKE
 crc pr 12                 # review PR #12 of the origin repo and post the review
 crc pr 12 --dry-run       # print the review instead of posting it
 crc pr https://github.com/owner/repo/pull/12
-crc pr 12 --full          # review the whole PR again, not just the new commits
+crc pr 12 --full          # review the whole PR again, not just what changed since the last review
 ```
 
 If the PR's head isn't what you have checked out, crc reviews it in a temporary git worktree, so your working copy isn't touched. It fetches the PR's commits if your clone doesn't have them.
@@ -82,7 +82,7 @@ The workflow skips drafts until they're marked ready for review. It also skips P
 ## How it works
 
 1. **Collect.** It runs `git diff` for the chosen scope and adds untracked files. It leaves out lockfiles, build output, minified files, binaries, untracked files over 512 KB, nested repositories, and anything matching your `ignore` globs. With `--staged`, the reviewer is told the working tree may hold unstaged edits, and snippets come from the staged version.
-2. **Review.** Files go into batches of about 1,500 diff lines. Each batch goes to `claude -p` with a reviewer system prompt, the diff with new-file line numbers, your project guidelines, and a JSON schema for the findings. Claude has read-only tools (Read, Grep, Glob), so it can check callers and definitions before reporting something. Batches run two at a time.
+2. **Review.** Files go into batches of about 1,500 diff lines. Each batch goes to `claude -p` with a reviewer system prompt, the diff with new-file line numbers, your project guidelines, and a JSON schema for the findings. Claude has read-only tools (Read, Grep, Glob), so it can check callers and definitions before reporting something. Batches run two at a time. If one fails, for example because the plan's usage limit was reached, no new batches start, and the run fails without posting.
 3. **Verify.** Every finding goes to a second `claude -p` run whose only job is to try to disprove it against the actual code. Rejected findings are dropped (see them with `--show-rejected`). The verifier can lower a severity but not raise it.
 4. **Report.** Results are sorted by severity, with the cited code lines attached, and printed as text, Markdown, or JSON. For a pull request, each finding is placed on a line GitHub accepts comments on (taken from the PR's own diff), or listed in the review body if it can't be. If GitHub still rejects an inline position, crc posts the review again with every finding in the body.
 
@@ -99,7 +99,7 @@ Run `crc init` to write a `.crc.json` in the repo root. Every key is optional:
   "guidelines": ["CLAUDE.md", "AGENTS.md", ".github/copilot-instructions.md"],
   "model": "opus",
   "verifyModel": "opus",
-  "effort": "high",
+  "effort": "medium",
   "verifyEffort": "medium",
   "verify": true,
   "nits": false

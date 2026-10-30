@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { addedFileDiff, diffSize, lineInDiff, parseUnifiedDiff, renderFileDiff } from "../src/diff.ts";
+import { addedFileDiff, diffSize, lineInDiff, parseUnifiedDiff, renderFileDiff, sameChange } from "../src/diff.ts";
 
 const MODIFIED = `diff --git a/src/app.ts b/src/app.ts
 index 1111111..2222222 100644
@@ -128,4 +128,12 @@ test("renderFileDiff puts new-file line numbers in the left column", () => {
   assert.equal(lines[3], "   - const a = 1;");
   assert.equal(lines[4], " 2 + const a = 2;");
   assert.match(renderFileDiff({ ...f!, status: "deleted" }), /\(file deleted\)$/);
+});
+
+test("sameChange ignores where a hunk sits but not what it changes", () => {
+  const diff = (start: number, added: string) =>
+    parseUnifiedDiff(`diff --git a/a.js b/a.js\n--- a/a.js\n+++ b/a.js\n@@ -${start},3 +${start},3 @@ fn()\n x\n-y\n+${added}\n z\n`)[0]!;
+  assert.equal(sameChange(diff(10, "Y"), diff(40, "Y")), true);
+  assert.equal(sameChange(diff(10, "Y"), diff(10, "W")), false);
+  assert.equal(sameChange(diff(10, "Y"), { ...diff(10, "Y"), status: "renamed", oldPath: "b.js" }), false);
 });

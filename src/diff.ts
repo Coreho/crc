@@ -136,6 +136,16 @@ export function addedFileDiff(path: string, content: string): FileDiff {
   return { path, status: "added", binary: false, hunks, additions: lines.length, deletions: 0 };
 }
 
+/**
+ * True when two diffs of a file make the same change, even if the hunks moved
+ * because lines above them changed (as after a rebase).
+ */
+export function sameChange(a: FileDiff, b: FileDiff): boolean {
+  const key = (f: FileDiff) =>
+    JSON.stringify([f.status, f.oldPath ?? "", f.binary, f.hunks.map((h) => h.lines.map((l) => [l.kind, l.text]))]);
+  return key(a) === key(b);
+}
+
 /** Number of diff lines, used to size review batches. */
 export function diffSize(f: FileDiff): number {
   return f.hunks.reduce((n, h) => n + h.lines.length, 0);

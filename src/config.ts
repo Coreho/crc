@@ -48,7 +48,7 @@ export const DEFAULT_CONFIG: Config = {
   guidelines: ["CLAUDE.md", "AGENTS.md", ".github/copilot-instructions.md"],
   model: "opus",
   verifyModel: "opus",
-  effort: "high",
+  effort: "medium",
   verifyEffort: "medium",
   verify: true,
   nits: false,

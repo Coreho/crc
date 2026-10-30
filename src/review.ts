@@ -29,6 +29,11 @@ export interface ReviewOptions {
   config: Config;
   runModel: RunModel;
   includeUntracked?: boolean;
+  /**
+   * Review only these changed files. The rest of the change is named to the
+   * model as context but gets no findings; pull requests use this after a rebase.
+   */
+  only?: string[];
   /** Parallel model calls. */
   concurrency?: number;
   /** Diff lines per review batch; a single larger file still gets one batch. */
@@ -51,9 +56,11 @@ export async function runReview(opts: ReviewOptions): Promise<ReviewResult> {
   const changes = await collectChanges(root, opts.scope, opts.includeUntracked ?? true);
   const skipped = [...changes.skipped];
   const reviewable: FileDiff[] = [];
+  const leftOut: string[] = [];
   for (const f of changes.files) {
     if (f.binary) skipped.push({ path: f.path, reason: "binary" });
     else if (isIgnored(f.path, config)) skipped.push({ path: f.path, reason: "ignored" });
+    else if (opts.only && !opts.only.includes(f.path)) leftOut.push(f.path);
     else reviewable.push(f);
   }
   reviewable.sort((a, b) => a.path.localeCompare(b.path));
@@ -82,7 +89,7 @@ export async function runReview(opts: ReviewOptions): Promise<ReviewResult> {
   let done = 0;
   const reviews = await mapLimit(batches, concurrency, async (batch) => {
     const batchPaths = batch.map((f) => f.path);
-    const otherPaths = allPaths.filter((p) => !batchPaths.includes(p));
+    const otherPaths = [...allPaths.filter((p) => !batchPaths.includes(p)), ...leftOut];
     const res = await runModel({
       system: REVIEW_SYSTEM,
       prompt: reviewPrompt({
@@ -103,7 +110,7 @@ export async function runReview(opts: ReviewOptions): Promise<ReviewResult> {
     if (batches.length > 1) progress(`Reviewed batch ${++done}/${batches.length}`);
     const review = parseReviewOutput(res.output);
     const findings = review.findings
-      .map((raw) => normalizeFinding(raw, root, allPaths, byPath))
+      .map((raw) => normalizeFinding(raw, root, [...allPaths, ...leftOut], byPath))
       // Another batch owns these files and reviews them with their diff in view.
       .filter((f) => !otherPaths.includes(f.file));
     return { summary: review.summary, findings };
@@ -278,23 +285,28 @@ export function makeBatches(files: FileDiff[], maxLines: number): FileDiff[][] {
   return batches;
 }
 
-/** Like Promise.all with a concurrency cap, but waits for every task before rejecting. */
+/**
+ * Like Promise.all with a concurrency cap, but waits for running tasks before
+ * rejecting. After the first failure no new tasks start, since the review is
+ * lost anyway and each one would spend more of the plan.
+ */
 async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results: PromiseSettledResult<R>[] = new Array(items.length);
+  const results: R[] = new Array(items.length);
+  let failure: { reason: unknown } | undefined;
   let next = 0;
   const worker = async () => {
-    while (next < items.length) {
+    while (!failure && next < items.length) {
       const i = next++;
-      results[i] = await fn(items[i]!).then(
-        (value) => ({ status: "fulfilled", value }) as const,
-        (reason: unknown) => ({ status: "rejected", reason }) as const,
-      );
+      try {
+        results[i] = await fn(items[i]!);
+      } catch (reason) {
+        failure ??= { reason };
+      }
     }
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  const failed = results.find((r) => r.status === "rejected");
-  if (failed) throw failed.reason;
-  return results.map((r) => (r as PromiseFulfilledResult<R>).value);
+  if (failure) throw failure.reason;
+  return results;
 }
 
 function chunk<T>(items: T[], size: number): T[][] {

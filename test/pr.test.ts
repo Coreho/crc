@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { childEnv, type ModelRequest, type ModelResult } from "../src/backend.ts";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import { GitHub, parsePrRef, type NewReview } from "../src/github.ts";
-import { buildReview, lastReviewedSha, placeFinding, reviewPullRequest } from "../src/pr.ts";
+import { buildReview, lastReview, placeFinding, reviewPullRequest } from "../src/pr.ts";
 import type { Finding, ReviewResult } from "../src/types.ts";
 import { makeRepo } from "./helpers.ts";
 
@@ -118,7 +118,7 @@ test("posts a full review with inline comments and a reviewed-commit marker", as
   assert.match(review!.body, /Bumps the return values\./);
   assert.match(review!.body, /\*\*2 findings\*\* \(2 major\)/);
   assert.match(review!.body, /#### Findings outside the diff\n\n- \*\*Major\*\* · bug · `src\/app\.js:40`: \*\*Far away\*\*/);
-  assert.match(review!.body, new RegExp(`<!-- crc:reviewed=${headSha} -->$`));
+  assert.match(review!.body, new RegExp(`<!-- crc:base=${baseSha} -->\\n<!-- crc:reviewed=${headSha} -->$`));
 });
 
 test("after an earlier crc review, only the new commits are reviewed", async () => {
@@ -142,7 +142,7 @@ test("after an earlier crc review, only the new commits are reviewed", async () 
   assert.match(outcome.review!.body, new RegExp(`No issues found in 1 file at the commits since \`${firstSha.slice(0, 7)}\``));
 });
 
-test("a merge from the base branch since the last review triggers a full review", async () => {
+test("a merge from the base branch since the last review re-reviews the PR's changes, not the base branch's", async () => {
   const { root, git, write, firstSha } = setup();
   // main moves on, and the PR branch merges it in ("Update branch").
   write("other.js", "export const x = 1;\n");
@@ -166,8 +166,87 @@ test("a merge from the base branch since the last review triggers a full review"
     dryRun: true,
   });
   const prompt = model.calls[0]!.prompt;
-  assert.match(prompt, /PR #7 "Bump numbers"/, "full review, not incremental");
+  assert.match(prompt, /PR #7 "Bump numbers".*only the files whose changes differ/, "compared with the last review, not incremental");
+  assert.match(prompt, /2 \+ {3}return 10;/, "app.js changed since the last review, so its whole change is shown");
   assert.doesNotMatch(prompt, /other\.js/, "base-branch changes stay out of the review");
+});
+
+/** main with two files; a feature branch that crc reviewed, then rebased onto a newer main. */
+function rebaseSetup() {
+  const lines = (tag: string) => Array.from({ length: 30 }, (_, i) => `${tag}${i}`);
+  const text = (l: string[]) => l.join("\n") + "\n";
+  const edit = (l: string[], i: number, s: string) => l.map((x, j) => (j === i ? s : x));
+  const a = lines("a");
+  const b = lines("b");
+  const repo = makeRepo({ "a.js": text(a), "b.js": text(b) });
+  const baseSha = repo.git("rev-parse", "HEAD").trim();
+  repo.git("checkout", "-q", "-b", "feature");
+  repo.write("a.js", text(edit(a, 20, "A20")));
+  repo.write("b.js", text(edit(b, 20, "B20")));
+  repo.git("commit", "-q", "-am", "feature work");
+  const reviewedSha = repo.git("rev-parse", "HEAD").trim();
+  // main moves on: two lines inserted at the top of a.js shift the feature's hunk.
+  repo.git("checkout", "-q", "main");
+  repo.write("a.js", text(["top1", "top2", ...a]));
+  repo.write("c.js", "export const c = 1;\n");
+  repo.git("add", "-A");
+  repo.git("commit", "-q", "-m", "work on main");
+  const newBase = repo.git("rev-parse", "HEAD").trim();
+  repo.git("checkout", "-q", "feature");
+  repo.git("rebase", "-q", "main");
+  const rebasedSha = repo.git("rev-parse", "HEAD").trim();
+  const moreB = (head: string) => {
+    repo.git("checkout", "-q", head);
+    repo.write("b.js", text(edit(edit(b, 20, "B20"), 25, "B25")));
+    repo.git("commit", "-q", "-am", "more b");
+    return repo.git("rev-parse", "HEAD").trim();
+  };
+  return { ...repo, baseSha, reviewedSha, newBase, rebasedSha, moreB };
+}
+
+test("after a rebase that changed nothing in the PR, nothing is reviewed again", async () => {
+  const { root, baseSha, reviewedSha, newBase, rebasedSha, git } = rebaseSetup();
+  git("checkout", "-q", "main");
+  const github = fakeGitHub({ headSha: rebasedSha, baseSha: newBase, reviews: [{ body: `<!-- crc:base=${baseSha} -->\n<!-- crc:reviewed=${reviewedSha} -->` }] });
+  const model = fakeModel([]);
+  const outcome = await reviewPullRequest({ root, pr: { repo: "o/r", number: 7 }, gh: github.gh, config: { ...DEFAULT_CONFIG }, runModel: model.run });
+  assert.equal(outcome.status, "posted");
+  assert.equal(model.calls.length, 0);
+  const body = github.posted[0]!.body;
+  assert.match(body, new RegExp(`Nothing new to review at \`${rebasedSha.slice(0, 7)}\`: the branch was rebased or merged since crc's last review at \`${reviewedSha.slice(0, 7)}\``));
+  assert.match(body, new RegExp(`<!-- crc:base=${newBase} -->\\n<!-- crc:reviewed=${rebasedSha} -->$`), "the next review compares against this one");
+});
+
+test("after a rebase, only files whose changes differ are reviewed, the rest named as context", async () => {
+  const { root, reviewedSha, newBase, rebasedSha, moreB, git } = rebaseSetup();
+  const head = moreB(rebasedSha);
+  git("checkout", "-q", "main");
+  // An older review without a recorded base: the merge base with today's base stands in.
+  const github = fakeGitHub({ headSha: head, baseSha: newBase, reviews: [{ body: `<!-- crc:reviewed=${reviewedSha} -->` }] });
+  const model = fakeModel([]);
+  const outcome = await reviewPullRequest({
+    root,
+    pr: { repo: "o/r", number: 7 },
+    gh: github.gh,
+    config: { ...DEFAULT_CONFIG, verify: false },
+    runModel: model.run,
+    dryRun: true,
+  });
+  assert.equal(model.calls.length, 1);
+  const prompt = model.calls[0]!.prompt;
+  assert.match(prompt, /Review the changes to these files: b\.js\. These files are also part of the change[^:]*: a\.js\./);
+  assert.match(prompt, /\+ B20[\s\S]*\+ B25/, "b.js gets its whole change reviewed again");
+  assert.doesNotMatch(prompt, /A20|c\.js/);
+  assert.match(outcome.review!.body, /No issues found in 1 file at `[0-9a-f]{7}`\.\n\nThe branch was rebased or merged .* 1 file with the same changes was skipped\./);
+});
+
+test("--full reviews every file even after a rebase", async () => {
+  const { root, reviewedSha, newBase, rebasedSha, git } = rebaseSetup();
+  git("checkout", "-q", "main");
+  const github = fakeGitHub({ headSha: rebasedSha, baseSha: newBase, reviews: [{ body: `<!-- crc:reviewed=${reviewedSha} -->` }] });
+  const model = fakeModel([]);
+  await reviewPullRequest({ root, pr: { repo: "o/r", number: 7 }, gh: github.gh, config: { ...DEFAULT_CONFIG, verify: false }, runModel: model.run, dryRun: true, full: true });
+  assert.match(model.calls[0]!.prompt, /Review the changes to these files: a\.js, b\.js\.$/);
 });
 
 test("ignores reviewed-markers posted by people without write access", async () => {
@@ -251,7 +330,7 @@ test("a suggestion is attached only when the comment covers exactly the finding'
   ]);
 });
 
-test("parsePrRef, lastReviewedSha, and childEnv", () => {
+test("parsePrRef, lastReview, and childEnv", () => {
   assert.deepEqual(parsePrRef("12", "o/r"), { repo: "o/r", number: 12 });
   assert.deepEqual(parsePrRef("#12", "o/r"), { repo: "o/r", number: 12 });
   assert.deepEqual(parsePrRef("a-b/c.d#3", undefined), { repo: "a-b/c.d", number: 3 });
@@ -263,16 +342,19 @@ test("parsePrRef, lastReviewedSha, and childEnv", () => {
   const b = "b".repeat(40);
   const c = "c".repeat(40);
   const review = (body: string | null, login: string, author_association: string) => ({ id: 1, body, commit_id: null, html_url: "", user: { login }, author_association });
-  assert.equal(
-    lastReviewedSha([
-      review(`<!-- crc:reviewed=${a} -->`, "github-actions[bot]", "NONE"),
+  assert.deepEqual(
+    lastReview([
+      review(`<!-- crc:base=${c} -->
+<!-- crc:reviewed=${a} -->`, "github-actions[bot]", "NONE"),
       review(null, "someone", "OWNER"),
       review(`x <!-- crc:reviewed=${b} -->`, "me", "OWNER"),
       review(`<!-- crc:reviewed=${c} -->`, "drive-by", "FIRST_TIME_CONTRIBUTOR"),
     ]),
-    b,
+    { sha: b, base: undefined },
   );
-  assert.equal(lastReviewedSha([]), undefined);
+  assert.deepEqual(lastReview([review(`<!-- crc:base=${c} -->
+<!-- crc:reviewed=${a} -->`, "github-actions[bot]", "NONE")]), { sha: a, base: c });
+  assert.equal(lastReview([]), undefined);
 
   const env = childEnv({ PATH: "/bin", GITHUB_TOKEN: "x", gh_token: "y", INPUT_GITHUB_TOKEN: "z", CLAUDE_CODE_OAUTH_TOKEN: "keep", ANTHROPIC_API_KEY: "keep" });
   assert.deepEqual(Object.keys(env).sort(), ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "PATH"]);
