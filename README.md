@@ -1,6 +1,6 @@
 # crc
 
-_Last updated: 2026-10-29_
+_Last updated: 2026-11-09_
 
 A personal AI code reviewer in the spirit of CodeRabbit. It reads a diff, has Claude review it with read access to the rest of the repo, runs a second skeptical pass that throws out false positives, and reports the findings that survive, each with file, line, severity, and an optional fix. It works on local changes from your terminal and on GitHub pull requests, where it posts a review with inline comments and one-click suggested changes.
 
@@ -70,8 +70,9 @@ To review every pull request in a repository as it's opened or updated:
 1. Copy [`examples/crc-review.yml`](examples/crc-review.yml) to `.github/workflows/crc-review.yml` in that repository.
 2. Run `claude setup-token` and copy the token it prints (valid for a year).
 3. Save it as an Actions secret named `CLAUDE_CODE_OAUTH_TOKEN`. For one repository, run `gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo owner/repo` and paste the token when asked. For every repository you own (and those of organizations you administer) that has the workflow, run [`scripts/set-token.ps1`](scripts/set-token.ps1). It asks for the token once, without echoing it, and sets the secret in each one. Run it again when the token expires. `-WhatIf` lists the repositories without changing anything.
+4. Optional: to skip pasting the token every time, save it once with `scripts/set-token.ps1 -Save`. It's stored in `%APPDATA%\crc\token.xml`, encrypted with Windows DPAPI so only your Windows account can decrypt it. After that, `scripts/set-token.ps1 -Stored` (or `-Stored -Repo owner/name` for a new repository) sets the secret without asking. The token goes from the file to `gh secret set` through stdin, so it never appears on a command line or in the output, and an AI assistant can run it for you. When the token expires, run `claude setup-token`, then `-Save` again, then `-Stored` once to update every repository.
 
-Do the token steps in your own terminal, not through an AI assistant, so the token doesn't end up in a transcript.
+Do the steps that involve the token itself (`claude setup-token`, pasting it, `-Save`) in your own terminal, not through an AI assistant, so the token doesn't end up in a transcript.
 
 The workflow uses `Coreho/crc@main` as its action. This repository is public, so any repository can use it, public or private. Reviews posted from Actions appear under `github-actions[bot]`. Reviews posted with `crc pr` from your machine appear under your own account. Pass extra flags with the action's `args` input, such as `args: --no-verify --model sonnet`.
 
